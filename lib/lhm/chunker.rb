@@ -10,6 +10,7 @@ module Lhm
     include SqlHelper
 
     attr_reader :connection
+    attr_accessor :paused
 
     # Copy from origin to destination in chunks of size `stride`. Sleeps for
     # `throttle` milliseconds between each stride.
@@ -20,6 +21,7 @@ module Lhm
       @throttle = options[:throttle] || 100
       @start = options[:start] || select_start
       @limit = options[:limit] || select_limit
+      @paused = false
     end
 
     # Copies chunks of size `stride`, starting from `start` up to id `limit`.
@@ -81,15 +83,52 @@ module Lhm
       end
     end
 
+    def pause!
+      self.paused = true
+    end
+
+    def continue!
+      self.paused = false
+    end
+
+    def interruptable
+      old_handler = trap("SIGINT") { paused ? super : pause! }
+      yield
+    ensure
+      trap("SIGINT", old_handler)
+    end
+
+    def handle_pause
+      print "\nChunking is paused [c: continue, t: set throttle, s: set stride, ctrl+c: abort]: "
+      case $stdin.gets.strip.downcase
+      when "c", "continue"
+        continue!
+      when "t", "throttle"
+        print "Set new throttle value in ms [current: #{@throttle}]: "
+        @throttle = $stdin.gets.to_i
+        continue!
+      when "s", "stride"
+        print "Set new stride value [current: #{@stride}]: "
+        @stride = $stdin.gets.to_i
+        continue!
+      end
+    end
+
     def execute
-      up_to do |lowest, highest|
-        affected_rows = @connection.update(copy(lowest, highest))
+      interruptable do
+        up_to do |lowest, highest|
+          affected_rows = @connection.update(copy(lowest, highest))
 
-        if affected_rows > 0
-          sleep(throttle_seconds)
+          if paused
+            handle_pause
+          end
+
+          if affected_rows > 0
+            sleep(throttle_seconds)
+          end
+
+          print "."
         end
-
-        print "."
       end
       print "\n"
     end
